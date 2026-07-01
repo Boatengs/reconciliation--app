@@ -79,7 +79,7 @@ def load_billing(file) -> pd.DataFrame:
         "Category": df[cat_col].astype(str).str.strip() if cat_col else "",
         "AgeRange": df[age_col].astype(str).str.strip(),
         "Days": pd.to_numeric(df[days_col], errors="coerce").fillna(0),
-        "Country": df[country_col].astype(str) if country_col else "",
+        "Country": (df[country_col].astype(str).replace({"nan": "", "NaN": ""}) if country_col else ""),
         "PremiumBilled": pd.to_numeric(df[premium_col], errors="coerce").fillna(0),
     })
     if code_col:
@@ -91,21 +91,63 @@ def load_billing(file) -> pd.DataFrame:
 
 
 def load_rates(file) -> pd.DataFrame:
-    """Load a rate table. Expects a Code-like column and a rate/premium/amount column."""
+    """Load a rate table. Tries a clean 'Code' + 'Rate' header format first.
+    Falls back to scanning the whole sheet for CODE / AGE-RANGE style values
+    (e.g. "NA1 0-15") next to a numeric rate — this handles rate cards that
+    are laid out as stacked region blocks with repeated sub-headers, rather
+    than one clean table."""
     raw = pd.read_excel(file, header=None, sheet_name=0)
-    hdr = find_header_row(raw, must_contain="code")
-    df = pd.read_excel(file, header=hdr, sheet_name=0)
-    df = df.dropna(how="all")
-    cols = list(df.columns)
-    code_col = _pick_column(cols, ["code"])
-    rate_col = _pick_column(cols, ["premium"], ["rate"], ["amount"])
-    if code_col is None or rate_col is None:
-        raise ValueError("Rate table needs a 'Code' column and a rate/premium/amount column.")
-    out = pd.DataFrame({
-        "Code": df[code_col].astype(str).str.strip(),
-        "Rate": pd.to_numeric(df[rate_col], errors="coerce"),
-    }).dropna(subset=["Rate"])
-    return out.reset_index(drop=True)
+
+    try:
+        hdr = find_header_row(raw, must_contain="code")
+        df = pd.read_excel(file, header=hdr, sheet_name=0)
+        df = df.dropna(how="all")
+        cols = list(df.columns)
+        code_col = _pick_column(cols, ["code"])
+        rate_col = _pick_column(cols, ["premium"], ["rate"], ["amount"])
+        if code_col is not None and rate_col is not None:
+            out = pd.DataFrame({
+                "Code": df[code_col].astype(str).str.strip(),
+                "Rate": pd.to_numeric(df[rate_col], errors="coerce"),
+            }).dropna(subset=["Rate"])
+            if len(out) > 0:
+                return out.reset_index(drop=True)
+    except ValueError:
+        pass
+
+    # --- Fallback: pattern-scan for "CODE AGE-RANGE" style values anywhere ---
+    code_pattern = re.compile(r"^[A-Za-z]{2,4}\d?\s+(\d{1,3}-\d{1,3}|\d{1,3}\+)$")
+    codes, rates = [], []
+    n_rows, n_cols = raw.shape
+    for i in range(n_rows):
+        for j in range(n_cols):
+            val = raw.iat[i, j]
+            if not isinstance(val, str):
+                continue
+            if not code_pattern.match(val.strip()):
+                continue
+            rate_val = None
+            for k in range(j + 1, n_cols):
+                v2 = raw.iat[i, k]
+                if pd.notna(v2):
+                    try:
+                        rate_val = float(str(v2).replace(",", "").replace("$", "").strip())
+                        break
+                    except ValueError:
+                        continue
+            if rate_val is not None:
+                codes.append(val.strip())
+                rates.append(rate_val)
+
+    if codes:
+        out = pd.DataFrame({"Code": codes, "Rate": rates}).drop_duplicates(subset=["Code"])
+        return out.reset_index(drop=True)
+
+    raise ValueError(
+        "Rate table needs either a 'Code' + rate/premium/amount column, or "
+        "rows shaped like 'NA1 0-15   1,236.19' somewhere in the sheet. "
+        "Neither pattern was found."
+    )
 
 
 def load_rectification(file) -> pd.DataFrame:
