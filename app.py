@@ -209,12 +209,23 @@ def build_excel(validation_df, summary, warning, rect_df, tolerance, rate_is_ann
             (None if pd.isna(row["PercentDiff"]) else row["PercentDiff"]),
             row["Status"], row["Reason"],
         ])
+    last_data_row = ws.max_row
     for r in range(2, ws.max_row + 1):
         for c in range(1, len(headers) + 1):
             ws.cell(row=r, column=c).font = data_font
             if c in (10, 11, 12, 13, 14):
                 ws.cell(row=r, column=c).number_format = num_fmt
         ws.cell(row=r, column=4).number_format = "mm/dd/yyyy"
+
+    total_row = last_data_row + 1
+    ws.cell(row=total_row, column=1, value="TOTAL").font = bold_font
+    for col_letter, col_idx in [("I", 9), ("J", 10), ("K", 11), ("L", 12), ("M", 13)]:
+        cell = ws.cell(row=total_row, column=col_idx, value=f"=SUM({col_letter}2:{col_letter}{last_data_row})")
+        cell.font = bold_font
+        cell.number_format = num_fmt
+        cell.border = Border(top=Side(style="thin"))
+    ws.cell(row=total_row, column=1).border = Border(top=Side(style="thin"))
+
     widths = [20, 16, 16, 12, 8, 12, 18, 16, 14, 16, 14, 14, 14, 12, 10, 32]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
