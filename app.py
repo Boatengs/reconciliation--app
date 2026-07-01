@@ -13,12 +13,16 @@ from datetime import date
 
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from docx import Document
 from docx.shared import Pt, RGBColor
 
-from reconcile import load_billing, load_rates, load_rectification, run_reconciliation, build_summary
+from reconcile import (
+    load_billing, load_rates, load_rectification, run_reconciliation, build_summary,
+    category_rollup, data_quality_checks, preview_billing_columns,
+)
 
 st.set_page_config(page_title="Cigna Premium Reconciliation", layout="wide")
 
@@ -121,6 +125,9 @@ h2, h3 {
 [data-testid="stAlertContainer"][kind="error"], [data-testid="stAlert"]:has(svg[data-testid="stAlertErrorIcon"]) { background-color: #FBE4E1 !important; }
 /* Divider hairlines */
 hr { border-color: var(--line); }
+/* Text inputs in the main (light) area should not inherit the dark sidebar widget background */
+.stTextInput input, .stNumberInput input { background-color: #FFFFFF !important; color: var(--ink) !important; border: 1px solid var(--line) !important; }
+[data-testid="stSidebar"] .stTextInput input { background-color: rgba(255,255,255,0.08) !important; color: var(--panel-text) !important; border: 1px solid rgba(255,255,255,0.25) !important; }
 /* Results table */
 .ledger-table { width:100%; border-collapse: collapse; font-size: 0.85rem; margin-bottom: 1.5em; }
 .ledger-table th { text-align:left; text-transform:uppercase; letter-spacing:0.05em; font-size:0.7rem; color: var(--ink-muted); border-bottom: 2px solid var(--ink); padding: 6px 10px; }
@@ -166,6 +173,28 @@ with st.sidebar:
     period_label = st.text_input("Period label (for the report title)", value="")
 
     run_btn = st.button("Run reconciliation", type="primary", width="stretch")
+
+# ---------------------------------------------------------------------------
+# Pre-run column preview — show what got matched before committing to a run
+# ---------------------------------------------------------------------------
+if billing_file is not None:
+    try:
+        _mapping, _hdr = preview_billing_columns(billing_file)
+        _missing = [k for k, v in _mapping.items() if v is None and k in
+                    ("Unique Identifier", "Age range", "Days insured", "Premium medical")]
+        with st.expander(
+            f"Column check for {billing_file.name}" + (" — missing required column(s)" if _missing else " — looks good"),
+            expanded=bool(_missing),
+        ):
+            rows = "".join(
+                f'<tr><td>{field}</td><td>{"<span style=\'color:var(--amber)\'>not found</span>" if col is None else col}</td></tr>'
+                for field, col in _mapping.items()
+            )
+            st.markdown(f'<table class="ledger-table"><tr><th>Expected field</th><th>Matched column</th></tr>{rows}</table>', unsafe_allow_html=True)
+            if _missing:
+                st.warning(f"Missing required: {', '.join(_missing)}. Reconciliation will fail until these are found.")
+    except Exception as _e:
+        st.warning(f"Couldn't preview columns yet: {_e}")
 
 # ---------------------------------------------------------------------------
 # Excel builder
@@ -541,9 +570,35 @@ if run_btn:
             st.error(f"Could not read one of the files: {e}")
             st.stop()
 
+    dq_issues = data_quality_checks(billing_df)
+
     with st.spinner("Reconciling..."):
         validation_df, warning = run_reconciliation(billing_df, rates_df, tolerance, rate_is_annual)
         summary = build_summary(validation_df)
+
+    # Store everything needed to render results in session_state. Streamlit
+    # reruns the whole script on every widget interaction (e.g. typing in the
+    # search box below) — st.button only returns True on the exact run it was
+    # clicked, so without this, any interaction after running would wipe the
+    # results back to the "upload your files" screen.
+    st.session_state["results"] = dict(
+        validation_df=validation_df, summary=summary, warning=warning,
+        rect_df=rect_df, dq_issues=dq_issues, tolerance=tolerance,
+        rate_is_annual=rate_is_annual, period_label=period_label,
+    )
+
+# ---------------------------------------------------------------------------
+# Render results (from session_state, so it survives reruns from other widgets)
+# ---------------------------------------------------------------------------
+if "results" in st.session_state:
+    r = st.session_state["results"]
+    validation_df, summary, warning = r["validation_df"], r["summary"], r["warning"]
+    rect_df, dq_issues = r["rect_df"], r["dq_issues"]
+    tolerance, rate_is_annual, period_label = r["tolerance"], r["rate_is_annual"], r["period_label"]
+
+    if dq_issues:
+        for issue in dq_issues:
+            st.warning(f"Data check: {issue}")
 
     st.success(f"Done — {summary['total_rows']} records reviewed.")
 
@@ -559,8 +614,67 @@ if run_btn:
         '</div>'
     st.markdown(cards_html, unsafe_allow_html=True)
 
+    # ---- Charts ----
+    rollup_df = category_rollup(validation_df)
+    group_label = rollup_df.columns[0]
+    group_label_display = "region" if group_label == "DerivedRegion" else "category"
+    if len(rollup_df) > 0:
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.markdown(f'<p style="font-size:0.85rem;font-weight:600;color:var(--ink-muted);text-transform:uppercase;letter-spacing:0.05em;">Avg % gap by {group_label_display}</p>', unsafe_allow_html=True)
+            bar_colors = ["#B5651D" if abs(v) > tolerance else "#0E6B5C" for v in rollup_df["AvgPctDiff"].fillna(0)]
+            fig_bar = go.Figure(go.Bar(
+                x=rollup_df[group_label], y=rollup_df["AvgPctDiff"],
+                marker_color=bar_colors, text=rollup_df["AvgPctDiff"].apply(lambda v: f"{v:.1f}%" if pd.notna(v) else ""),
+                textposition="outside",
+            ))
+            fig_bar.add_hline(y=tolerance, line_dash="dot", line_color="#B5651D", opacity=0.5)
+            fig_bar.add_hline(y=-tolerance, line_dash="dot", line_color="#B5651D", opacity=0.5)
+            fig_bar.update_layout(
+                height=320, margin=dict(l=10, r=10, t=10, b=10),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter", color="#16211D"),
+                yaxis_title="Avg % gap", xaxis_title=None,
+            )
+            st.plotly_chart(fig_bar, width="stretch", config={"displayModeBar": False})
+        with chart_col2:
+            st.markdown('<p style="font-size:0.85rem;font-weight:600;color:var(--ink-muted);text-transform:uppercase;letter-spacing:0.05em;">Distribution of % gap</p>', unsafe_allow_html=True)
+            pct_vals = validation_df["PercentDiff"].dropna()
+            if len(pct_vals) > 0:
+                fig_hist = go.Figure(go.Histogram(x=pct_vals, marker_color="#0E6B5C", nbinsx=30))
+                fig_hist.add_vline(x=tolerance, line_dash="dot", line_color="#B5651D", opacity=0.5)
+                fig_hist.add_vline(x=-tolerance, line_dash="dot", line_color="#B5651D", opacity=0.5)
+                fig_hist.update_layout(
+                    height=320, margin=dict(l=10, r=10, t=10, b=10),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(family="Inter", color="#16211D"),
+                    yaxis_title="Records", xaxis_title="% gap",
+                )
+                st.plotly_chart(fig_hist, width="stretch", config={"displayModeBar": False})
+            else:
+                st.caption("No records with a nonzero expected premium to chart.")
+
+        # ---- Rollup table ----
+        st.markdown(f'<p style="font-size:0.85rem;font-weight:600;color:var(--ink-muted);text-transform:uppercase;letter-spacing:0.05em;margin-top:10px;">Breakdown by {group_label_display}</p>', unsafe_allow_html=True)
+        rollup_display = rollup_df.copy()
+        for c in ["TotalBilled", "TotalExpected", "TotalDiff"]:
+            rollup_display[c] = rollup_display[c].apply(lambda v: f"${v:,.2f}")
+        rollup_display["AvgPctDiff"] = rollup_display["AvgPctDiff"].apply(lambda v: "" if pd.isna(v) else f"{v:.2f}%")
+        st.markdown(rollup_display.to_html(escape=False, index=False, classes="ledger-table"), unsafe_allow_html=True)
+
     st.subheader("Validation detail")
+    search_term = st.text_input("Search (Unique Identifier, name, or code)", value="", placeholder="Type to filter…")
     display_df = validation_df.copy()
+    if search_term.strip():
+        s = search_term.strip().lower()
+        mask = (
+            display_df["UID"].str.lower().str.contains(s, na=False)
+            | display_df["NameFamily"].str.lower().str.contains(s, na=False)
+            | display_df["FirstNameFamily"].str.lower().str.contains(s, na=False)
+            | display_df["Code"].str.lower().str.contains(s, na=False)
+        )
+        display_df = display_df[mask]
+        st.caption(f"{len(display_df)} of {len(validation_df)} records match \"{search_term}\"")
     display_df["Status"] = display_df["Status"].apply(
         lambda s: f'<span class="stamp {"ok" if s == "OK" else "check"}">{s}</span>'
     )

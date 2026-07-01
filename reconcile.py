@@ -288,3 +288,77 @@ def build_summary(validation_df):
         "total_billed": total_billed, "total_expected": total_expected,
         "total_diff": total_diff, "avg_ok_pct": avg_ok_pct,
     }
+
+
+# ---------------------------------------------------------------------------
+# Rollups, data quality, and pre-run preview
+# ---------------------------------------------------------------------------
+
+def category_rollup(validation_df, group_col="DerivedRegion"):
+    """Group results by region (or category) so a systemic issue affecting
+    one group is visible, not just the grand total. Falls back to 'Category'
+    if DerivedRegion is entirely blank (no region could be determined)."""
+    df = validation_df.copy()
+    if group_col == "DerivedRegion" and df["DerivedRegion"].replace("", np.nan).isna().all():
+        group_col = "Category"
+
+    df["_group"] = df[group_col].replace("", "(unspecified)")
+    grouped = df.groupby("_group").agg(
+        Records=("UID", "count"),
+        OK=("Status", lambda s: (s == "OK").sum()),
+        CHECK=("Status", lambda s: (s == "CHECK").sum()),
+        NoRate=("Status", lambda s: (s == "No Rate").sum()),
+        TotalBilled=("PremiumBilled", "sum"),
+        TotalExpected=("ExpectedUSD", "sum"),
+        TotalDiff=("DifferenceUSD", "sum"),
+        AvgPctDiff=("PercentDiff", "mean"),
+    ).reset_index().rename(columns={"_group": group_col})
+    return grouped.sort_values("Records", ascending=False).reset_index(drop=True)
+
+
+def data_quality_checks(billing_df):
+    """Best-effort checks for issues that would silently distort totals.
+    Returns a list of human-readable warning strings (empty if clean)."""
+    issues = []
+    dup = billing_df["UID"].value_counts()
+    dup = dup[dup > 1]
+    if len(dup) > 0:
+        issues.append(
+            f"{len(dup)} Unique Identifier(s) appear more than once in the billing file "
+            f"(e.g. {dup.index[0]} appears {int(dup.iloc[0])} times) — this will double-count "
+            f"their premium in the totals."
+        )
+    neg_days = (billing_df["Days"] < 0).sum()
+    if neg_days > 0:
+        issues.append(f"{int(neg_days)} record(s) have negative insured days.")
+    neg_prem = (billing_df["PremiumBilled"] < 0).sum()
+    if neg_prem > 0:
+        issues.append(f"{int(neg_prem)} record(s) have a negative billed premium — confirm these are intentional credits, not data errors.")
+    blank_code = (billing_df["Code"].str.strip() == "").sum()
+    if blank_code > 0:
+        issues.append(f"{int(blank_code)} record(s) have no category/age code and can't be matched to a rate.")
+    return issues
+
+
+def preview_billing_columns(file):
+    """Detect which source column maps to each expected field, without
+    building the full validation. Lets the UI show 'here's what I matched'
+    before the person commits to running the reconciliation."""
+    raw = pd.read_excel(file, header=None, sheet_name=0)
+    hdr = find_header_row(raw)
+    df = pd.read_excel(file, header=hdr, sheet_name=0)
+    cols = list(df.columns)
+    mapping = {
+        "Unique Identifier": _pick_column(cols, ["unique", "identifier"]),
+        "Name Family": _pick_column(cols, ["name", "family"], ["name"]),
+        "First Name Family": _pick_column(cols, ["first", "name", "family"], ["first", "name"]),
+        "DOB": _pick_column(cols, ["dob"], ["date", "birth"]),
+        "Age": _pick_column(cols, ["age"]),
+        "Category": _pick_column(cols, ["category", "family"], ["category"]),
+        "Age range": _pick_column(cols, ["age", "range"]),
+        "Days insured": _pick_column(cols, ["days", "insured"]),
+        "Country name station": _pick_column(cols, ["country", "name", "station"], ["country", "station"]),
+        "Code": _pick_column(cols, ["code"]),
+        "Premium medical": _pick_column(cols, ["premium", "medical"], exclude="taxes"),
+    }
+    return mapping, hdr
