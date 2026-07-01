@@ -51,7 +51,9 @@ def _pick_column(columns, *keyword_sets, exclude=None):
 
 def load_billing(file) -> pd.DataFrame:
     """Load a billing/rectification-style extract. Returns a standardized
-    DataFrame: UID, Category, AgeRange, Code, Days, Country, PremiumBilled."""
+    DataFrame: UID, NameFamily, FirstNameFamily, DOB, AgeNum, Category,
+    AgeRange, Code, Days, Country, PremiumBilled. Name/DOB/AgeNum are
+    optional — left blank if the source file doesn't have them."""
     raw = pd.read_excel(file, header=None, sheet_name=0)
     hdr = find_header_row(raw)
     df = pd.read_excel(file, header=hdr, sheet_name=0)
@@ -59,6 +61,10 @@ def load_billing(file) -> pd.DataFrame:
 
     cols = list(df.columns)
     uid_col = _pick_column(cols, ["unique", "identifier"])
+    name_col = _pick_column(cols, ["name", "family"], ["name"])
+    fname_col = _pick_column(cols, ["first", "name", "family"], ["first", "name"])
+    dob_col = _pick_column(cols, ["dob"], ["date", "birth"])
+    age_num_col = _pick_column(cols, ["age"])
     cat_col = _pick_column(cols, ["category", "family"], ["category"])
     age_col = _pick_column(cols, ["age", "range"])
     days_col = _pick_column(cols, ["days", "insured"])
@@ -76,10 +82,14 @@ def load_billing(file) -> pd.DataFrame:
 
     out = pd.DataFrame({
         "UID": df[uid_col].astype(str),
+        "NameFamily": (df[name_col].fillna("").astype(str) if name_col else ""),
+        "FirstNameFamily": (df[fname_col].fillna("").astype(str) if fname_col else ""),
+        "DOB": (pd.to_datetime(df[dob_col], errors="coerce") if dob_col else pd.NaT),
+        "AgeNum": (pd.to_numeric(df[age_num_col], errors="coerce") if age_num_col else np.nan),
         "Category": df[cat_col].astype(str).str.strip() if cat_col else "",
         "AgeRange": df[age_col].astype(str).str.strip(),
         "Days": pd.to_numeric(df[days_col], errors="coerce").fillna(0),
-        "Country": (df[country_col].astype(str).replace({"nan": "", "NaN": ""}) if country_col else ""),
+        "Country": (df[country_col].fillna("").astype(str) if country_col else ""),
         "PremiumBilled": pd.to_numeric(df[premium_col], errors="coerce").fillna(0),
     })
     if code_col:
@@ -95,7 +105,9 @@ def load_rates(file) -> pd.DataFrame:
     Falls back to scanning the whole sheet for CODE / AGE-RANGE style values
     (e.g. "NA1 0-15") next to a numeric rate — this handles rate cards that
     are laid out as stacked region blocks with repeated sub-headers, rather
-    than one clean table."""
+    than one clean table. A 'Region' column is included where it can be
+    determined (from a header, or from a region-label row like "Orion
+    Region 1" appearing above a block of codes) — left blank otherwise."""
     raw = pd.read_excel(file, header=None, sheet_name=0)
 
     try:
@@ -105,27 +117,37 @@ def load_rates(file) -> pd.DataFrame:
         cols = list(df.columns)
         code_col = _pick_column(cols, ["code"])
         rate_col = _pick_column(cols, ["premium"], ["rate"], ["amount"])
+        region_col = _pick_column(cols, ["region"])
         if code_col is not None and rate_col is not None:
             out = pd.DataFrame({
                 "Code": df[code_col].astype(str).str.strip(),
                 "Rate": pd.to_numeric(df[rate_col], errors="coerce"),
+                "Region": (df[region_col].astype(str).str.strip() if region_col else ""),
             }).dropna(subset=["Rate"])
             if len(out) > 0:
                 return out.reset_index(drop=True)
     except ValueError:
         pass
 
-    # --- Fallback: pattern-scan for "CODE AGE-RANGE" style values anywhere ---
+    # --- Fallback: pattern-scan for "CODE AGE-RANGE" style values anywhere,
+    # tracking the most recent "Region" label seen above each block ---
     code_pattern = re.compile(r"^[A-Za-z]{2,4}\d?\s+(\d{1,3}-\d{1,3}|\d{1,3}\+)$")
-    codes, rates = [], []
+    region_pattern = re.compile(r"region\s*\d+|region\s*[a-z]\b", re.IGNORECASE)
+    codes, rates, regions = [], [], []
     n_rows, n_cols = raw.shape
+    current_region = ""
     for i in range(n_rows):
+        row_has_code = False
         for j in range(n_cols):
             val = raw.iat[i, j]
             if not isinstance(val, str):
                 continue
+            m = region_pattern.search(val)
+            if m and not code_pattern.match(val.strip()):
+                current_region = m.group(0).strip().title()
             if not code_pattern.match(val.strip()):
                 continue
+            row_has_code = True
             rate_val = None
             for k in range(j + 1, n_cols):
                 v2 = raw.iat[i, k]
@@ -138,9 +160,12 @@ def load_rates(file) -> pd.DataFrame:
             if rate_val is not None:
                 codes.append(val.strip())
                 rates.append(rate_val)
+                regions.append(current_region)
+        if row_has_code:
+            continue
 
     if codes:
-        out = pd.DataFrame({"Code": codes, "Rate": rates}).drop_duplicates(subset=["Code"])
+        out = pd.DataFrame({"Code": codes, "Rate": rates, "Region": regions}).drop_duplicates(subset=["Code"])
         return out.reset_index(drop=True)
 
     raise ValueError(
@@ -192,8 +217,13 @@ def run_reconciliation(billing_df, rates_df, tolerance_pct=10.0, rate_is_annual=
     df = billing_df.merge(rates_df, on="Code", how="left")
     df["RateFound"] = df["Rate"].notna()
     df["Rate"] = df["Rate"].fillna(0)
+    if "Region" not in df.columns:
+        df["Region"] = ""
+    df["Region"] = df["Region"].fillna("")
+    df = df.rename(columns={"Region": "DerivedRegion"})
 
-    monthly_rate = df["Rate"] / 12 if rate_is_annual else df["Rate"]
+    df["MonthlyRate"] = df["Rate"] / 12 if rate_is_annual else df["Rate"]
+    monthly_rate = df["MonthlyRate"]
     df["ExpectedUSD"] = np.where(df["Days"] == 0, 0, monthly_rate * df["Days"] / 30)
     df["DifferenceUSD"] = df["PremiumBilled"] - df["ExpectedUSD"]
     df["PercentDiff"] = np.where(

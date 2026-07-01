@@ -189,25 +189,28 @@ def build_excel(validation_df, summary, warning, rect_df, tolerance, rate_is_ann
 
     # ---- Validation ----
     ws = wb.create_sheet("Validation")
-    headers = ["Unique Identifier", "Category", "Age range", "Country", "N of days insured",
-               "Code", "RatePremiumUSD", "ExpectedUSD", "Premium medical", "DifferenceUSD",
-               "PercentDiff", "Status", "Reason"]
+    headers = ["Unique Identifier", "Name Family", "First Name Family", "DOB", "Age", "Age range",
+               "Country name station", "Derived Region", "N° of days insured", "MonthlyPremiumUSD",
+               "ExpectedUSD", "Premium medical", "DifferenceUSD", "PercentDiff", "Status", "Reason"]
     ws.append(headers)
     style_header(ws, len(headers))
     for _, row in validation_df.iterrows():
+        dob_val = row["DOB"].date() if pd.notna(row["DOB"]) else None
+        age_val = None if pd.isna(row["AgeNum"]) else row["AgeNum"]
         ws.append([
-            row["UID"], row["Category"], row["AgeRange"], row["Country"], row["Days"],
-            row["Code"], row["Rate"], round(row["ExpectedUSD"], 2), round(row["PremiumBilled"], 2),
-            round(row["DifferenceUSD"], 2),
+            row["UID"], row["NameFamily"], row["FirstNameFamily"], dob_val, age_val, row["AgeRange"],
+            row["Country"], row["DerivedRegion"], row["Days"], round(row["MonthlyRate"], 2),
+            round(row["ExpectedUSD"], 2), round(row["PremiumBilled"], 2), round(row["DifferenceUSD"], 2),
             (None if pd.isna(row["PercentDiff"]) else row["PercentDiff"]),
             row["Status"], row["Reason"],
         ])
     for r in range(2, ws.max_row + 1):
         for c in range(1, len(headers) + 1):
             ws.cell(row=r, column=c).font = data_font
-            if c in (7, 8, 9, 10, 11):
+            if c in (10, 11, 12, 13, 14):
                 ws.cell(row=r, column=c).number_format = num_fmt
-    widths = [22, 12, 12, 14, 14, 14, 16, 14, 14, 14, 12, 10, 32]
+        ws.cell(row=r, column=4).number_format = "mm/dd/yyyy"
+    widths = [20, 16, 16, 12, 8, 12, 18, 16, 14, 16, 14, 14, 14, 12, 10, 32]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     ws.freeze_panes = "A2"
@@ -240,22 +243,32 @@ def build_excel(validation_df, summary, warning, rect_df, tolerance, rate_is_ann
 
     # ---- Exceptions ----
     ws3 = wb.create_sheet("Exceptions")
-    ws3.append(headers)
-    style_header(ws3, len(headers))
+    exc_headers = ["Unique Identifier", "DOB", "Age", "Age range", "Country name station",
+                   "Derived Region", "N° of days insured", "MonthlyPremiumUSD", "ExpectedUSD",
+                   "Premium medical", "DifferenceUSD", "PercentDiff", "Status", "Reason"]
+    ws3.append(exc_headers)
+    style_header(ws3, len(exc_headers))
     exc = validation_df[validation_df["Status"] == "CHECK"]
     for _, row in exc.iterrows():
+        dob_val = row["DOB"].date() if pd.notna(row["DOB"]) else None
+        age_val = None if pd.isna(row["AgeNum"]) else row["AgeNum"]
         ws3.append([
-            row["UID"], row["Category"], row["AgeRange"], row["Country"], row["Days"],
-            row["Code"], row["Rate"], round(row["ExpectedUSD"], 2), round(row["PremiumBilled"], 2),
-            round(row["DifferenceUSD"], 2), row["PercentDiff"], row["Status"], row["Reason"],
+            row["UID"], dob_val, age_val, row["AgeRange"], row["Country"], row["DerivedRegion"],
+            row["Days"], round(row["MonthlyRate"], 2), round(row["ExpectedUSD"], 2),
+            round(row["PremiumBilled"], 2), round(row["DifferenceUSD"], 2), row["PercentDiff"],
+            row["Status"], row["Reason"],
         ])
     if len(exc) == 0:
         ws3["A2"] = "No exceptions found"
         ws3["A2"].font = data_font
     for r in range(2, ws3.max_row + 1):
-        for c in range(1, len(headers) + 1):
+        for c in range(1, len(exc_headers) + 1):
             ws3.cell(row=r, column=c).font = data_font
-    for i, w in enumerate(widths, start=1):
+            if c in (8, 9, 10, 11, 12):
+                ws3.cell(row=r, column=c).number_format = num_fmt
+        ws3.cell(row=r, column=2).number_format = "mm/dd/yyyy"
+    exc_widths = [20, 12, 8, 12, 18, 16, 14, 16, 14, 14, 14, 12, 10, 32]
+    for i, w in enumerate(exc_widths, start=1):
         ws3.column_dimensions[ws3.cell(row=1, column=i).column_letter].width = w
 
     # ---- Rectification (if provided) ----
@@ -535,16 +548,23 @@ if run_btn:
     display_df["Status"] = display_df["Status"].apply(
         lambda s: f'<span class="stamp {"ok" if s == "OK" else "check"}">{s}</span>'
     )
-    for col in ["Rate", "ExpectedUSD", "PremiumBilled", "DifferenceUSD"]:
+    for col in ["MonthlyRate", "ExpectedUSD", "PremiumBilled", "DifferenceUSD"]:
         display_df[col] = display_df[col].round(2)
     display_df["PercentDiff"] = display_df["PercentDiff"].apply(
         lambda v: "" if pd.isna(v) else f"{v:.2f}%"
     )
-    display_df = display_df.rename(columns={
-        "UID": "Member", "AgeRange": "Age range", "Days": "Days insured",
-        "Rate": "Rate table premium", "ExpectedUSD": "Expected",
-        "PremiumBilled": "Billed", "DifferenceUSD": "Difference", "PercentDiff": "% gap",
-    }).drop(columns=["RateFound"])
+    display_df["DOB"] = display_df["DOB"].dt.strftime("%Y-%m-%d").fillna("")
+    display_df = display_df[[
+        "UID", "NameFamily", "FirstNameFamily", "DOB", "AgeNum", "AgeRange", "Country",
+        "DerivedRegion", "Days", "MonthlyRate", "ExpectedUSD", "PremiumBilled",
+        "DifferenceUSD", "PercentDiff", "Status", "Reason",
+    ]].rename(columns={
+        "UID": "Unique Identifier", "NameFamily": "Name Family", "FirstNameFamily": "First Name Family",
+        "AgeNum": "Age", "AgeRange": "Age range", "Country": "Country name station",
+        "DerivedRegion": "Derived Region", "Days": "N of days insured",
+        "MonthlyRate": "MonthlyPremiumUSD", "PremiumBilled": "Premium medical",
+        "DifferenceUSD": "DifferenceUSD", "PercentDiff": "PercentDiff",
+    })
     st.markdown(
         display_df.to_html(escape=False, index=False, classes="ledger-table"),
         unsafe_allow_html=True,
