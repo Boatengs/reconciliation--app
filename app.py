@@ -114,6 +114,11 @@ h2, h3 {
 .stDownloadButton button:hover { background-color: var(--teal); }
 /* Warning box override to match palette */
 [data-testid="stAlert"] { border-radius: 3px; }
+[data-testid="stAlert"], [data-testid="stAlert"] * { color: var(--ink) !important; }
+[data-testid="stAlertContainer"][kind="warning"], [data-testid="stAlert"]:has(svg[data-testid="stAlertWarningIcon"]) { background-color: var(--amber-bg) !important; }
+[data-testid="stAlertContainer"][kind="success"], [data-testid="stAlert"]:has(svg[data-testid="stAlertSuccessIcon"]) { background-color: var(--sage-bg) !important; }
+[data-testid="stAlertContainer"][kind="info"], [data-testid="stAlert"]:has(svg[data-testid="stAlertInfoIcon"]) { background-color: #E3EDF5 !important; }
+[data-testid="stAlertContainer"][kind="error"], [data-testid="stAlert"]:has(svg[data-testid="stAlertErrorIcon"]) { background-color: #FBE4E1 !important; }
 /* Divider hairlines */
 hr { border-color: var(--line); }
 /* Results table */
@@ -160,7 +165,7 @@ with st.sidebar:
 
     period_label = st.text_input("Period label (for the report title)", value="")
 
-    run_btn = st.button("Run reconciliation", type="primary", use_container_width=True)
+    run_btn = st.button("Run reconciliation", type="primary", width="stretch")
 
 # ---------------------------------------------------------------------------
 # Excel builder
@@ -572,7 +577,7 @@ if run_btn:
 
     if rect_df is not None:
         st.subheader("Rectification detail")
-        st.dataframe(rect_df, use_container_width=True, height=200)
+        st.dataframe(rect_df, width="stretch", height=200)
 
     excel_buf = build_excel(validation_df, summary, warning, rect_df, tolerance, rate_is_annual)
     report_buf = build_report(summary, warning, rect_df, tolerance, rate_is_annual, period_label, validation_df)
@@ -581,12 +586,12 @@ if run_btn:
     dcol1.download_button(
         "Download reconciled workbook (.xlsx)", excel_buf,
         file_name=f"Reconciliation_{date.today().isoformat()}.xlsx",
-        use_container_width=True,
+        width="stretch",
     )
     dcol2.download_button(
         "Download report (.docx)", report_buf,
         file_name=f"Reconciliation_Report_{date.today().isoformat()}.docx",
-        use_container_width=True,
+        width="stretch",
     )
 else:
     st.info("Upload your billing file and rate table on the left, then click **Run reconciliation**.")
